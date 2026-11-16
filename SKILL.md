@@ -1,6 +1,6 @@
 ---
 name: Pre-Automation Audit
-description: Use before an agent automates or refactors a codebase end-to-end. Runs a pre-flight gate on anti-patterns, artifact verification (logs/IO), and linting, and enforces deterministic, high-trust, low-token execution.
+description: Use before an agent automates or refactors a codebase end-to-end. Runs a pre-flight gate on anti-patterns, artifact verification (logs/IO), and linting; requires root-cause fixes proven by reproduction artifacts; enforces deterministic, high-trust, low-token execution.
 ---
 
 # Pre-Automation Audit
@@ -11,6 +11,11 @@ allowed after every gate below has **recorded evidence**. No gate, no automation
 The point is not to slow work down. It is to replace "the agent says it works"
 with artifacts you can re-run, and to shrink the surface where guessing can
 happen.
+
+Fixes remove causes. Artifacts are how you prove the cause is gone — not merely
+that the symptom stopped. A change that makes the error disappear while the
+original trigger still reproduces is not a fix, it is a cover-up with a green
+diff.
 
 ## Gate 0: Can this be done without an agent?
 
@@ -46,6 +51,36 @@ Look for:
 Record each as `file:line — pattern — risk`. If the sweep is large, write it to a
 file and reference that path instead of pasting it back.
 
+### Patch smells
+
+These are symptoms wearing a fix's clothes. Flag them; do not accept them as the
+solution:
+
+- Retry, backoff, or `sleep` wrapped around an unhandled race or ordering bug.
+- A widened timeout where the real issue is a blocked or unbounded wait.
+- `try`/`except` that swallows, logs-and-continues, or returns a default.
+- A disabled, skipped, or loosened check (`xfail`, `skip`, `# noqa`,
+  `# type: ignore`, `eslint-disable`, raised threshold).
+- A defensive null or empty-value check added downstream of the real bad value.
+- A duplicated guard instead of one enforced invariant.
+- A config toggle that turns the failing path off rather than repairing it.
+
+If one of these is genuinely the right tool, say why the cause is out of reach
+and get approval. Otherwise it is a rejected candidate, not a design.
+
+## Gate 1.5: Reproduce and name the cause
+
+No reproduction, no fix.
+
+- Produce a **failing** command, test, or log that fails *for the stated reason*.
+  Capture it as an artifact: command, exit code, the exact failing line.
+- State the cause in one sentence and quote the artifact line that shows it.
+- If a test suite exists, the reproduction must be a test that fails before the
+  change and passes after. A manual transcript is acceptable only when no test
+  harness exists.
+- If the cause cannot be named, the task is **investigate**, not **fix**. Do not
+  start editing to find out what the problem is.
+
 ## Gate 2: Artifact verification (logs / IO)
 
 Prove current behavior from artifacts, not from reading code.
@@ -56,6 +91,19 @@ Prove current behavior from artifacts, not from reading code.
 - Diff after every change against that baseline.
 - A change is done only when the artifact diff is the intended one and nothing
   else moved.
+
+### Cause evidence
+
+The baseline proves what broke; the re-run proves it is repaired.
+
+- Re-run **the same** reproduction from Gate 1.5, unchanged.
+- Accept only when it passes *and* the original trigger no longer produces the
+  symptom.
+- Reject when any of these hold:
+  - The symptom is gone but the Gate 1.5 trigger still reproduces it.
+  - The error is now swallowed, downgraded, or retried into silence.
+  - A check, test, or assertion was weakened, skipped, or removed.
+  - The failing path was made unreachable instead of correct.
 
 Never report success from memory of what the code should do. If you cannot
 produce an artifact, say what is missing instead of asserting a result.
@@ -72,11 +120,14 @@ Run what the repo already defines, in this order, and record raw output:
 
 Do not introduce a new toolchain as part of automation. If a check is missing,
 state that it is missing rather than inventing one or silently skipping it.
+A passing lint run does not excuse a suppression added to make it pass.
 
 ## Execution rules
 
 These are hard constraints, not preferences.
 
+- **Root cause, not symptom.** Fix the condition that produced the artifact. A
+  diff whose only effect is to hide the symptom is not a candidate solution.
 - **No AI-generated comments.** Do not add comments, docstrings, banners, or
   explanatory blocks. Match existing comment density; default to zero. A comment
   is allowed only when the user asks for it, or when preserving an existing one.
@@ -86,8 +137,10 @@ These are hard constraints, not preferences.
   the fewest guesses. Pin versions, sort collections, fix seeds and timezones,
   make steps idempotent and re-runnable. If a guess is unavoidable, stop and ask
   instead of encoding it.
-- **Smallest reversible step.** One concern per change, baseline artifact each
-  time, so a failure is localized and undoable.
+- **Smallest change that removes the cause.** One concern per change, baseline
+  artifact each time, so a failure is localized and undoable. Reversibility
+  constrains size, never scope: if the honest fix is larger than the patch, split
+  it into ordered steps that each remove part of the cause.
 - **Prefer plain code.** If a deterministic script solves it, write the script
   rather than prompting repeatedly.
 
@@ -96,6 +149,9 @@ These are hard constraints, not preferences.
 Stop and ask the user when:
 
 - A gate has no artifact to show.
+- The cause cannot be named from the reproduction.
+- The cause requires a redesign the current scope does not allow — propose the
+  redesign; do not paper over it.
 - Two approaches are equally valid and the choice changes public behavior.
 - Verification needs credentials, network access, or data you do not have.
 - The repo's checks cannot run at all.
@@ -106,9 +162,11 @@ Report in this order, terse:
 
 1. `Gate 0:` verdict, plus why AI is needed for what remains.
 2. `Anti-patterns:` list, or `none found`.
-3. `Baseline:` commands and artifact paths.
-4. `Checks:` each command with pass or fail.
-5. `Plan:` ordered steps, each with its verification command.
-6. `Risks:` anything still guessed.
+3. `Cause:` one sentence, quoting the reproduction artifact line.
+4. `Reproduction:` command and path, before → after.
+5. `Baseline:` commands and artifact paths.
+6. `Checks:` each command with pass or fail.
+7. `Plan:` ordered steps, each with its verification command.
+8. `Risks:` anything still guessed.
 
 Then read `references/gate-checklist.md` and fill it in before starting work.
